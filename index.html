@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CartPole Forge — PPO 强化学习实验室</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#ffffff;--line:#e4e7ec;--ink:#1f2430;--muted:#6b7280;--accent:#2563eb;--accent2:#0ea5e9;}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--ink);font:14px/1.55 "Segoe UI","Microsoft YaHei",sans-serif;padding:18px}
+  h1{font-size:20px;margin-bottom:2px}
+  h2{font-size:14px;margin-bottom:8px;color:var(--muted);font-weight:600}
+  .sub{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+  .wrap{display:grid;grid-template-columns:250px 1fr;gap:14px;align-items:start}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+  label{display:block;font-size:12px;color:var(--muted);margin:8px 0 2px}
+  input,select,button{font:inherit}
+  input,select{width:100%;border:1px solid var(--line);border-radius:6px;padding:5px 8px;background:#fff;color:var(--ink)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:600}
+  button.ghost{background:#eef2ff;color:var(--accent)}
+  button.warn{background:#fef2f2;color:#dc2626;border:1px solid #fecaca}
+  .row{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .row button{flex:1}
+  #status{font-size:12px;color:var(--muted);margin-top:10px;white-space:pre-wrap}
+  canvas{display:block;background:#fbfcfe;border:1px solid var(--line);border-radius:8px;width:100%}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:8px}
+  code{background:#f1f3f7;border-radius:4px;padding:1px 5px;font-size:12px}
+  .big{font-size:22px;font-weight:700;color:var(--accent)}
+  .prob{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted);margin-top:4px}
+  .bar{height:10px;background:#eef2ff;border-radius:5px;flex:1;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent)}
+</style>
+</head>
+<body>
+<h1>CartPole Forge <span style="color:var(--muted);font-size:13px">· PPO 强化学习实验室</span></h1>
+<div class="sub">从零手写 PPO：策略网络 + 价值基线 + GAE 优势估计 + 裁剪代理目标 + 熵正则，纯 JS 零依赖。智能体学会平衡倒立摆 —— <code>max(−rA, −clip(r)·A)</code>，<code>r = π_new/π_old</code>。</div>
+
+<div class="wrap">
+  <div class="card">
+    <h2>训练参数</h2>
+    <label>迭代轮数 iters</label><input id="iters" type="number" value="200" min="20" max="500">
+    <label>每轮采样步数 rollout</label><input id="rollout" type="number" value="800" min="200" max="4000">
+    <label>单回合上限 maxSteps</label><input id="maxSteps" type="number" value="200" min="50" max="1000">
+    <label>学习率 lr</label><input id="lr" type="number" value="0.008" step="0.002" min="0.0005" max="0.05">
+    <label>隐藏层宽 hidden</label><input id="hidden" type="number" value="16" min="8" max="64">
+    <label>随机种子 seed</label><input id="seed" type="number" value="42">
+    <div class="row"><button id="btnTrain">训练</button><button id="btnReset" class="ghost">恢复默认</button></div>
+    <div id="status">未训练</div>
+    <h2 style="margin-top:14px">回报曲线（每轮平均步数）</h2>
+    <canvas id="cCurve" width="220" height="110"></canvas>
+    <div class="hint" id="evalHint"></div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>倒立摆演示（贪心策略）</h2>
+      <canvas id="cAnim" width="640" height="240"></canvas>
+      <div class="row">
+        <button id="btnPlay">播放</button>
+        <button id="btnPause" class="ghost">暂停</button>
+        <button id="btnNew" class="warn">重开一局</button>
+        <select id="speed" style="max-width:120px"><option value="1">1×</option><option value="3" selected>3×</option><option value="8">8×</option></select>
+      </div>
+      <div class="prob">向左推 <div class="bar"><i id="barL" style="width:50%"></i></div> <span id="pL">50%</span></div>
+      <div class="prob">向右推 <div class="bar"><i id="barR" style="width:50%;background:#0ea5e9"></i></div> <span id="pR">50%</span></div>
+      <div class="hint" id="liveHint">本局存活：<span id="liveSteps">0</span> 步 · 价值估计 <span id="liveVal">–</span></div>
+    </div>
+  </div>
+</div>
+
+<script id="engine">
+(function(){
+"use strict";
+var RL={};
+
+function mulberry32(a){
+  return function(){
+    a|=0;a=a+0x6D2B79F5|0;
+    var t=Math.imul(a^a>>>15,1|a);
+    t=t+Math.imul(t^t>>>7,61|t)^t;
+    return ((t^t>>>14)>>>0)/4294967296;
+  };
+}
+RL.mulberry32=mulberry32;
+function sigmoid(x){return 1/(1+Math.exp(-x));}
+
+/* ---------- CartPole 物理（gym 经典动力学） ---------- */
+RL.C={gravity:9.8,masscart:1.0,masspole:0.1,totalMass:1.1,length:0.5,
+      polemassLength:0.05,forceMag:10,tau:0.02,thetaThr:0.2095,xThr:2.4};
+RL.reset=function(rng){
+  return [(rng()*2-1)*0.05,(rng()*2-1)*0.05,(rng()*2-1)*0.05,(rng()*2-1)*0.05];
+};
+RL.step=function(s,action){
+  var C=RL.C,f=action===1?C.forceMag:-C.forceMag;
+  var cos=Math.cos(s[2]),sin=Math.sin(s[2]);
+  var temp=(f+C.polemassLength*s[3]*s[3]*sin)/C.totalMass;
+  var thetaacc=(C.gravity*sin-cos*temp)/(C.length*(4.0/3.0-C.masspole*cos*cos/C.totalMass));
+  var xacc=temp-C.polemassLength*thetaacc*cos/C.totalMass;
+  /* Euler：位置 += τ·速度，速度 += τ·加速度（θ 若加加速度一步飞 0.27rad，全是 1 步暴毙） */
+  var ns=[s[0]+C.tau*s[1],s[1]+C.tau*xacc,s[2]+C.tau*s[3],s[3]+C.tau*thetaacc];
+  var done=Math.abs(ns[0])>C.xThr||Math.abs(ns[2])>C.thetaThr;
+  return {state:ns,reward:1,done:done};
+};
+
+/* ---------- 小型 MLP（策略 & 价值共用结构） ---------- */
+function relu(v){var o=new Float64Array(v.length);for(var i=0;i<v.length;i++)o[i]=v[i]>0?v[i]:0;return o;}
+function dense(W,b,x,nin,nout){
+  var z=new Float64Array(nout);
+  for(var j=0;j<nout;j++){
+    var s=b[j],row=j*nin;
+    for(var k=0;k<nin;k++)s+=W[row+k]*x[k];
+    z[j]=s;
+  }
+  return z;
+}
+function netInit(sizes,rng){
+  var net={W:[],b:[],sizes:sizes,mW:[],vW:[],mb:[],vb:[],t:0};
+  for(var l=0;l<sizes.length-1;l++){
+    var nin=sizes[l],nout=sizes[l+1],W=new Float64Array(nin*nout);
+    var sc=Math.sqrt(2/nin);
+    for(var i=0;i<W.length;i++)W[i]=(rng()*2-1)*sc;
+    net.W.push(W);net.b.push(new Float64Array(nout));
+    net.mW.push(new Float64Array(nin*nout));net.vW.push(new Float64Array(nin*nout));
+    net.mb.push(new Float64Array(nout));net.vb.push(new Float64Array(nout));
+  }
+  return net;
+}
+function fwdOne(net,x){
+  var L=net.W.length,a=[x],z=[];
+  for(var l=0;l<L;l++){
+    var zi=dense(net.W[l],net.b[l],a[l],net.sizes[l],net.sizes[l+1]);
+    z.push(zi);a.push(l===L-1?zi:relu(zi));
+  }
+  return {a:a,z:z};
+}
+function softmax(z){
+  var m=z[0];for(var i=1;i<z.length;i++)if(z[i]>m)m=z[i];
+  var s=0,out=new Float64Array(z.length);
+  for(i=0;i<z.length;i++){out[i]=Math.exp(z[i]-m);s+=out[i];}
+  for(i=0;i<z.length;i++)out[i]/=s;
+  return out;
+}
+RL.policyForward=function(net,s){
+  var f=fwdOne(net,s),out=f.a[f.a.length-1];
+  return {probs:softmax(out),a:f.a,zs:f.z};
+};
+RL.valueForward=function(net,s){
+  var f=fwdOne(net,s);
+  return {v:f.a[f.a.length-1][0],a:f.a,zs:f.z};
+};
+
+/* ---------- Adam ---------- */
+RL.adam=function(net,g,lr){
+  var b1=0.9,b2=0.999,eps=1e-8;
+  net.t++;
+  var c1=1-Math.pow(b1,net.t),c2=1-Math.pow(b2,net.t);
+  for(var l=0;l<net.W.length;l++){
+    var W=net.W[l],gw=g.gW[l],mw=net.mW[l],vw=net.vW[l];
+    for(var i=0;i<W.length;i++){
+      mw[i]=b1*mw[i]+(1-b1)*gw[i];vw[i]=b2*vw[i]+(1-b2)*gw[i]*gw[i];
+      W[i]-=lr*(mw[i]/c1)/(Math.sqrt(vw[i]/c2)+eps);
+    }
+    var b=net.b[l],gb2=g.gb[l],mb=net.mb[l],vb=net.vb[l];
+    for(var j=0;j<b.length;j++){
+      mb[j]=b1*mb[j]+(1-b1)*gb2[j];vb[j]=b2*vb[j]+(1-b2)*gb2[j]*gb2[j];
+      b[j]-=lr*(mb[j]/c1)/(Math.sqrt(vb[j]/c2)+eps);
+    }
+  }
+};
+
+/* ---------- GAE（λ-优势） ---------- */
+/* rewards[t], values[t], dones[t]；最后一步之后的 bootstrap 值为 nextV（终止时为 0） */
+RL.gae=function(rewards,values,dones,gamma,lam,nextV){
+  var T=rewards.length,adv=new Array(T),g=0;
+  var deltas=new Array(T);
+  for(var t=0;t<T;t++){
+    var vNext=(t===T-1)?nextV:values[t+1];
+    if(dones[t])vNext=0;
+    deltas[t]=rewards[t]+gamma*vNext-values[t];
+  }
+  for(t=T-1;t>=0;t--){
+    g=deltas[t]+gamma*lam*(dones[t]?0:1)*g;
+    adv[t]=g;
+  }
+  return adv;
+};
+/* GAE 的暴力展开定义（对拍用） */
+RL.gaeBrute=function(rewards,values,dones,gamma,lam,nextV){
+  var T=rewards.length,adv=new Array(T);
+  function delta(t){
+    var vNext=(t===T-1)?nextV:values[t+1];
+    if(dones[t])vNext=0;
+    return rewards[t]+gamma*vNext-values[t];
+  }
+  for(var t=0;t<T;t++){
+    var s=0;
+    for(var l=0;t+l<T;l++){
+      var tt=t+l;
+      if(tt>t&&dones[tt-1])break;   /* done 之后优势不再向未来传递 */
+      s+=Math.pow(gamma*lam,l)*delta(tt);
+    }
+    adv[t]=s;
+  }
+  return adv;
+};
+
+/* ---------- PPO 损失 + 解析梯度 ---------- */
+/* batch: {states, actions, oldLogp, adv, ret}
+   L = mean[ max(−rA, −clip(r,1±ε)A) ] + cv·mean((V−R)²) − cEnt·mean(H)
+   只在策略最后一层 logits 的动作维有裁剪项梯度；熵项对所有 logits。 */
+RL.ppoLossAndGrad=function(policy,value,batch,o){
+  var S=batch.states,N=S.length,outDim=policy.sizes[policy.sizes.length-1];
+  var gWp=policy.W.map(function(w){return new Float64Array(w.length);});
+  var gbp=policy.b.map(function(b){return new Float64Array(b.length);});
+  var gWv=value.W.map(function(w){return new Float64Array(w.length);});
+  var gbv=value.b.map(function(b){return new Float64Array(b.length);});
+  var loss=0;
+  for(var n=0;n<N;n++){
+    var s=batch.states[n],a=batch.actions[n];
+    /* 策略前向 + 手推反向（relu MLP + softmax 头） */
+    var pf=RL.policyForward(policy,s),probs=pf.probs,Lp=policy.W.length;
+    var z=pf.zs[Lp-1];
+    var r=Math.exp(z[a]-batch.oldLogp[n]);
+    var A=batch.adv[n];
+    var uncl=-r*A;
+    var rc=-Math.max(1-o.clip,Math.min(1+o.clip,r))*A;   /* 裁剪分支同样取负：max(−rA, −clip(r)A) */
+    loss+=Math.max(uncl,rc);
+    var dza=(uncl>=rc)?-r*A:0;
+    /* dL/dz_j = dza·(j==a) + cEnt·π_j(logπ_j+H) */
+    var H=0;
+    for(var j=0;j<outDim;j++)if(probs[j]>0)H-=probs[j]*Math.log(probs[j]);
+    var dz=new Float64Array(outDim);
+    /* dH/dz_j = −π_j(log π_j + H)；损失含 −cEnt·H ⇒ 梯度 = cEnt·π_j(log π_j + H) */
+    for(j=0;j<outDim;j++)dz[j]=o.cEnt*probs[j]*(Math.log(Math.max(probs[j],1e-12))+H);
+    dz[a]+=dza;
+    for(j=0;j<outDim;j++)dz[j]/=N;          /* 批量均值：1/N */
+    /* 反传策略网络 */
+    backprop(policy,pf,z.length>0,dz,gWp,gbp);
+    /* 价值 */
+    var vf=RL.valueForward(value,s),V=vf.v;
+    var vd=V-batch.ret[n];
+    loss+=o.cValue*vd*vd;
+    loss-=o.cEnt*H;
+    var dv=new Float64Array(1);dv[0]=2*o.cValue*vd/N;
+    backprop(value,vf,true,dv,gWv,gbv);
+  }
+  return {loss:loss/N,gWp:gWp,gbp:gbp,gWv:gWv,gbv:gbv};
+};
+function backprop(net,f,haveOut,dLast,gW,gb){
+  var L=net.W.length,d=dLast;
+  for(var l=L-1;l>=0;l--){
+    var ain=f.a[l],nin=net.sizes[l],nout=net.sizes[l+1];
+    for(var j=0;j<nout;j++){
+      gb[l][j]+=d[j];
+      var row=j*nin;
+      for(var k=0;k<nin;k++)gW[l][row+k]+=d[j]*ain[k];
+    }
+    if(l>0){
+      var dp=new Array(nin);
+      for(var k2=0;k2<nin;k2++){
+        var s=0;
+        for(var j2=0;j2<nout;j2++)s+=net.W[l][j2*nin+k2]*d[j2];
+        dp[k2]=f.zs[l-1][k2]>0?s:0;
+      }
+      d=dp;
+    }
+  }
+}
+RL.mlpLossOnlyPolicy=function(policy,batch,o){return RL.ppoLossAndGrad(policy,valueDummy,batch,o).loss;};
+var valueDummy=null;
+RL.setValueDummy=function(v){valueDummy=v;};
+
+/* ---------- 采样一条轨迹 / 回合 ---------- */
+RL.runEpisode=function(policy,rng,maxSteps,greedy){
+  var s=RL.reset(rng),traj=[],steps=0;
+  for(var t=0;t<maxSteps;t++){
+    var pf=RL.policyForward(policy,s),a;
+    if(greedy){
+      a=pf.probs[1]>=pf.probs[0]?1:0;
+    }else{
+      var u=rng();a=u<pf.probs[0]?0:1;
+    }
+    var st=RL.step(s,a);
+    traj.push({s:s,a:a,logp:Math.log(Math.max(pf.probs[a],1e-12)),reward:st.reward,done:st.done,next:st.state});
+    s=st.state;steps++;
+    if(st.done)break;
+  }
+  return {traj:traj,steps:steps};
+};
+
+/* ---------- 训练主循环 ---------- */
+RL.train=function(opts){
+  var o={iters:200,rolloutSteps:800,maxSteps:200,lr:0.008,clip:0.2,epochs:4,
+         gamma:0.99,lam:0.95,cValue:0.5,cEnt:0.01,seed:42,hidden:16,evalEpisodes:10};
+  if(opts)for(var k in opts)o[k]=opts[k];
+  var rng=mulberry32(o.seed);
+  var policy=netInit([4,o.hidden,2],rng);
+  var value=netInit([4,o.hidden,1],rng);
+  RL.setValueDummy(value);
+  var hist=[];
+  for(var it=0;it<o.iters;it++){
+    /* 采集 rollout：按回合收集，每回合独立算 GAE */
+    var states=[],actions=[],oldLogp=[],advs=[],rets=[],epRet=[];
+    var total=0;
+    while(total<o.rolloutSteps){
+      var ep=RL.runEpisode(policy,rng,o.maxSteps,false);
+      var vs=ep.traj.map(function(tr){return RL.valueForward(value,tr.s).v;});
+      var lastTr=ep.traj[ep.traj.length-1];
+      var nextV=lastTr.done?0:RL.valueForward(value,lastTr.next).v;
+      var adv=RL.gae(ep.traj.map(function(tr){return tr.reward;}),vs,
+                     ep.traj.map(function(tr){return tr.done;}),o.gamma,o.lam,nextV);
+      for(var i=0;i<ep.traj.length;i++){
+        states.push(ep.traj[i].s);actions.push(ep.traj[i].a);
+        oldLogp.push(ep.traj[i].logp);advs.push(adv[i]);rets.push(adv[i]+vs[i]);
+      }
+      total+=ep.steps;epRet.push(ep.steps);
+    }
+    /* 优势归一化 */
+    var m=0,s2=0,n=advs.length;
+    for(i=0;i<n;i++)m+=advs[i]/n;
+    for(i=0;i<n;i++)s2+=(advs[i]-m)*(advs[i]-m)/n;
+    var sd=Math.sqrt(s2)||1;
+    for(i=0;i<n;i++)advs[i]=(advs[i]-m)/sd;
+    var batch={states:states,actions:actions,oldLogp:oldLogp,adv:advs,ret:rets};
+    /* PPO 更新 */
+    var lastLoss=0;
+    for(var e=0;e<o.epochs;e++){
+      var idx=states.map(function(_,i){return i;});
+      for(var i2=idx.length-1;i2>0;i2--){var jx=Math.floor(rng()*(i2+1)),tx=idx[i2];idx[i2]=idx[jx];idx[jx]=tx;}
+      var g=RL.ppoLossAndGrad(policy,value,batch,o);
+      RL.adam(policy,{gW:g.gWp,gb:g.gbp},o.lr);
+      RL.adam(value,{gW:g.gWv,gb:g.gbv},o.lr);
+      lastLoss=g.loss;
+    }
+    hist.push({ret:epRet.reduce(function(a,b){return a+b;},0)/epRet.length,loss:lastLoss});
+  }
+  /* 贪心评估 */
+  var evals=[];
+  for(var ev=0;ev<o.evalEpisodes;ev++){
+    evals.push(RL.runEpisode(policy,rng,o.maxSteps,true).steps);
+  }
+  var evalAvg=evals.reduce(function(a,b){return a+b;},0)/evals.length;
+  return {policy:policy,value:value,hist:hist,opts:o,evalAvg:evalAvg,evals:evals};
+};
+
+/* 贪心动作（供 UI / 评估） */
+RL.greedyAction=function(policy,s){
+  var pf=RL.policyForward(policy,s);
+  return {a:pf.probs[1]>=pf.probs[0]?1:0,probs:pf.probs};
+};
+
+/* ---------- 梯度检验 ---------- */
+RL.gradCheck=function(seed,eps){
+  seed=seed||5;eps=eps||1e-6;
+  var rng=mulberry32(seed);
+  var policy=netInit([4,6,2],rng),value=netInit([4,6,1],rng);
+  RL.setValueDummy(value);
+  var N=4,batch={states:[],actions:[],oldLogp:[],adv:[],ret:[]};
+  for(var n=0;n<N;n++){
+    batch.states.push([rng(),rng(),rng()-0.5,rng()-0.5]);
+    batch.actions.push(rng()<0.5?0:1);
+    batch.adv.push((rng()-0.5)*2);
+    batch.ret.push((rng()-0.5)*2);
+  }
+  /* oldLogp 取当前策略的 z_a，使 ratio 精确=1：远离 ±0.2 裁剪折点，中心差分才有效 */
+  for(n=0;n<N;n++){
+    var pf0=RL.policyForward(policy,batch.states[n]);
+    batch.oldLogp.push(pf0.zs[pf0.zs.length-1][batch.actions[n]]);
+  }
+  var o={clip:0.2,cValue:0.5,cEnt:0.01};
+  var an=RL.ppoLossAndGrad(policy,value,batch,o);
+  function lossOnly(){return RL.ppoLossAndGrad(policy,value,batch,o).loss;}
+  var maxRel=0;
+  function cmp(a,b){var rel=Math.abs(a-b)/Math.max(Math.abs(a),Math.abs(b),1e-8);if(rel>maxRel)maxRel=rel;}
+  function num(arr,idx){
+    var old=arr[idx];
+    arr[idx]=old+eps;var l1=lossOnly();
+    arr[idx]=old-eps;var l2=lossOnly();
+    arr[idx]=old;
+    return (l1-l2)/(2*eps);
+  }
+  var i;
+  for(i=0;i<policy.W[0].length;i++)cmp(an.gWp[0][i],num(policy.W[0],i));
+  for(i=0;i<policy.b[0].length;i++)cmp(an.gbp[0][i],num(policy.b[0],i));
+  for(i=0;i<policy.W[1].length;i++)cmp(an.gWp[1][i],num(policy.W[1],i));
+  for(i=0;i<policy.b[1].length;i++)cmp(an.gbp[1][i],num(policy.b[1],i));
+  for(i=0;i<value.W[0].length;i++)cmp(an.gWv[0][i],num(value.W[0],i));
+  for(i=0;i<value.W[1].length;i++)cmp(an.gWv[1][i],num(value.W[1],i));
+  return maxRel;
+};
+
+globalThis.RL=RL;
+})();
+</script>
+
+<script id="ui">
+(function(){
+if(typeof document==="undefined")return;
+function $(id){return document.getElementById(id);}
+var model=null,anim={s:null,steps:0,playing:false,raf:0};
+
+function readOpts(){
+  return {
+    iters:Math.max(20,Math.min(500,parseInt($("iters").value,10)||120)),
+    rolloutSteps:Math.max(200,Math.min(4000,parseInt($("rollout").value,10)||800)),
+    maxSteps:Math.max(50,Math.min(1000,parseInt($("maxSteps").value,10)||200)),
+    lr:Math.max(0.0005,Math.min(0.05,parseFloat($("lr").value)||0.008)),
+    hidden:Math.max(8,Math.min(64,parseInt($("hidden").value,10)||16)),
+    seed:parseInt($("seed").value,10)||42
+  };
+}
+
+function train(){
+  var o=readOpts();
+  $("status").textContent="训练中…";
+  model=RL.train(o);
+  var rets=model.hist.map(function(h){return h.ret;});
+  $("status").textContent="就绪 · iters="+o.iters+" · lr="+o.lr+
+    "\n评估平均存活 "+model.evalAvg.toFixed(0)+" / "+o.maxSteps+" 步";
+  $("evalHint").textContent="评估回报："+model.evals.join(", ");
+  drawCurve(rets);
+  newGame();
+}
+
+/* ---------- 动画 ---------- */
+function newGame(){
+  var rng=RL.mulberry32((model?model.opts.seed:42)+Math.floor(Math.random()*1e6));
+  anim.s=RL.reset(rng);anim.steps=0;
+  drawAnim();
+}
+function drawAnim(){
+  var cv=$("cAnim"),ctx=cv.getContext("2d"),W=cv.width,H=cv.height;
+  ctx.clearRect(0,0,W,H);
+  /* 轨道 */
+  ctx.strokeStyle="#cbd5e1";ctx.lineWidth=2;
+  ctx.beginPath();ctx.moveTo(20,H-40);ctx.lineTo(W-20,H-40);ctx.stroke();
+  /* 终点线 */
+  var x2px=function(x){return W/2+x/2.4*(W/2-30);};
+  ctx.strokeStyle="#fecaca";ctx.setLineDash([4,4]);
+  ctx.beginPath();ctx.moveTo(x2px(-2.4),H-60);ctx.lineTo(x2px(-2.4),H-20);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x2px(2.4),H-60);ctx.lineTo(x2px(2.4),H-20);ctx.stroke();
+  ctx.setLineDash([]);
+  if(!anim.s)return;
+  var cx=x2px(anim.s[0]),cy=H-40;
+  /* 小车 */
+  ctx.fillStyle="#2563eb";
+  ctx.fillRect(cx-25,cy-24,50,24);
+  ctx.fillStyle="#1e3a8a";
+  ctx.beginPath();ctx.arc(cx-15,cy,5,0,6.2832);ctx.fill();
+  ctx.beginPath();ctx.arc(cx+15,cy,5,0,6.2832);ctx.fill();
+  /* 杆 */
+  var px=cx,py=cy-24,len=90;
+  var tipx=px+len*Math.sin(anim.s[2]),tipy=py-len*Math.cos(anim.s[2]);
+  ctx.strokeStyle="#b45309";ctx.lineWidth=6;ctx.lineCap="round";
+  ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(tipx,tipy);ctx.stroke();
+  ctx.fillStyle="#b45309";ctx.beginPath();ctx.arc(tipx,tipy,5,0,6.2832);ctx.fill();
+  ctx.fillStyle="#6b7280";ctx.font="11px sans-serif";
+  ctx.fillText("x = "+anim.s[0].toFixed(2)+"   θ = "+(anim.s[2]*57.3).toFixed(1)+"°   步数 "+anim.steps,12,16);
+}
+function tick(){
+  if(!anim.playing||!model){anim.raf=0;return;}
+  var speed=parseInt($("speed").value,10)||1;
+  for(var i=0;i<speed;i++){
+    var g=RL.greedyAction(model.policy,anim.s);
+    $("barL").style.width=(g.probs[0]*100).toFixed(0)+"%";
+    $("barR").style.width=(g.probs[1]*100).toFixed(0)+"%";
+    $("pL").textContent=(g.probs[0]*100).toFixed(0)+"%";
+    $("pR").textContent=(g.probs[1]*100).toFixed(0)+"%";
+    var v=RL.valueForward(model.value,anim.s).v;
+    $("liveVal").textContent=v.toFixed(2);
+    var st=RL.step(anim.s,g.a);
+    anim.s=st.state;anim.steps++;
+    if(st.done){newGame();break;}
+  }
+  $("liveSteps").textContent=anim.steps;
+  drawAnim();
+  anim.raf=requestAnimationFrame(tick);
+}
+
+function drawCurve(rets){
+  var cv=$("cCurve"),ctx=cv.getContext("2d");
+  ctx.clearRect(0,0,cv.width,cv.height);
+  if(!rets||!rets.length)return;
+  var mn=0,mx=Math.max.apply(null,rets);
+  ctx.strokeStyle="rgba(37,99,235,0.35)";ctx.lineWidth=1;ctx.beginPath();
+  for(var i=0;i<rets.length;i++){
+    var x=6+i/(rets.length-1||1)*(cv.width-12);
+    var y=cv.height-10-(rets[i]-mn)/(mx-mn||1)*(cv.height-20);
+    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+  /* 移动平均 */
+  ctx.strokeStyle="#2563eb";ctx.lineWidth=1.8;ctx.beginPath();
+  var win=10;
+  for(i=0;i<rets.length;i++){
+    var s=0,c=0;
+    for(var j=Math.max(0,i-win+1);j<=i;j++){s+=rets[j];c++;}
+    var y2=cv.height-10-(s/c-mn)/(mx-mn||1)*(cv.height-20);
+    x=6+i/(rets.length-1||1)*(cv.width-12);
+    if(i===0)ctx.moveTo(x,y2);else ctx.lineTo(x,y2);
+  }
+  ctx.stroke();
+  ctx.fillStyle="#6b7280";ctx.font="10px sans-serif";
+  ctx.fillText("max "+mx.toFixed(0),4,11);
+}
+
+$("btnTrain").addEventListener("click",train);
+$("btnReset").addEventListener("click",function(){
+  $("iters").value=200;$("rollout").value=800;$("maxSteps").value=200;
+  $("lr").value=0.008;$("hidden").value=16;$("seed").value=42;
+  train();
+});
+$("btnPlay").addEventListener("click",function(){
+  if(!anim.playing){anim.playing=true;if(!anim.raf)anim.raf=requestAnimationFrame(tick);}
+});
+$("btnPause").addEventListener("click",function(){anim.playing=false;});
+$("btnNew").addEventListener("click",newGame);
+train();
+anim.playing=true;anim.raf=requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
