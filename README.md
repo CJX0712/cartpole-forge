@@ -1,5 +1,12 @@
 # CartPole Forge · PPO 强化学习实验室
 
+<p align="center">
+  <a href="https://github.com/CJX0712/cartpole-forge/actions/workflows/ci.yml"><img src="https://github.com/CJX0712/cartpole-forge/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/CJX0712/cartpole-forge/releases"><img src="https://img.shields.io/github/v/release/CJX0712/cartpole-forge?sort=semver" alt="release"></a>
+  <a href="https://github.com/CJX0712/cartpole-forge/blob/main/LICENSE"><img src="https://img.shields.io/github/license/CJX0712/cartpole-forge" alt="license"></a>
+  <img src="https://img.shields.io/badge/author-%E6%99%A8%E6%98%9F-1f6feb" alt="author">
+</p>
+
 单文件、零依赖、离线可跑的 PPO 强化学习实验室。浏览器直接打开 `index.html` 即可观看
 智能体用学到的策略平衡倒立摆。从零手写全部组件：CartPole 物理、策略/价值双网络、
 GAE 优势估计、PPO 裁剪代理目标、熵正则、Adam，约 350 行纯 JS。
